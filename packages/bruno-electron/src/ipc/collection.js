@@ -2612,7 +2612,7 @@ const registerMainEventHandlers = (mainWindow, watcher) => {
   ipcMain.handle('renderer:cleanup-failed-collections', async (event, { collectionPaths, collectionUids }) => {
     try {
       if (!collectionPaths && !collectionUids) {
-        return { success: true, cleaned: [] };
+        return { success: true, cleaned: [], updated: false };
       }
 
       const pathsToClean = [];
@@ -2622,13 +2622,14 @@ const registerMainEventHandlers = (mainWindow, watcher) => {
       }
 
       if (pathsToClean.length === 0) {
-        return { success: true, cleaned: [] };
+        return { success: true, cleaned: [], updated: false };
       }
 
       const LastOpenedCollections = require('../store/last-opened-collections');
       const lastOpenedCollections = new LastOpenedCollections();
 
       const cleanedPaths = [];
+      const cleanedCollectionUids = [];
 
       for (const pathToClean of pathsToClean) {
         const resolvedPath = path.isAbsolute(pathToClean)
@@ -2645,27 +2646,54 @@ const registerMainEventHandlers = (mainWindow, watcher) => {
           const collectionPath = path.isAbsolute(c.pathname)
             ? c.pathname
             : path.resolve(c.pathname);
-          return !cleanedPaths.includes(collectionPath);
+          const isCleaned = cleanedPaths.includes(collectionPath);
+          if (isCleaned) {
+            cleanedCollectionUids.push(c.uid);
+          }
+          return !isCleaned;
         });
 
         if (cleanedCollections.length === 0) {
           uiStateSnapshotStore.clearLastSession();
         } else {
+          const cleanedTabs = session.tabs?.filter((t) => 
+            cleanedCollections.some((c) => c.uid === t.collectionUid)
+          ) || [];
+
+          let updatedActiveTabUid = session.activeTabUid;
+          let activeTabChanged = false;
+
+          if (session.activeTabUid && cleanedTabs.length > 0) {
+            const activeTabInCleanedTabs = cleanedTabs.find((t) => t.uid === session.activeTabUid);
+            if (!activeTabInCleanedTabs) {
+              updatedActiveTabUid = cleanedTabs[0].uid;
+              activeTabChanged = true;
+            }
+          } else if (session.activeTabUid && cleanedTabs.length === 0) {
+            updatedActiveTabUid = null;
+            activeTabChanged = true;
+          }
+
           const cleanedSession = {
             ...session,
             collections: cleanedCollections,
-            tabs: session.tabs?.filter((t) => 
-              cleanedCollections.some((c) => c.uid === t.collectionUid)
-            ) || []
+            tabs: cleanedTabs,
+            activeTabUid: updatedActiveTabUid
           };
+
           uiStateSnapshotStore.saveLastSession(cleanedSession);
         }
       }
 
-      return { success: true, cleaned: cleanedPaths };
+      return { 
+        success: true, 
+        cleaned: cleanedPaths,
+        cleanedCollectionUids,
+        updated: cleanedPaths.length > 0 
+      };
     } catch (error) {
       console.error('Error cleaning up failed collections:', error);
-      return { success: false, error: error.message, cleaned: [] };
+      return { success: false, error: error.message, cleaned: [], cleanedCollectionUids: [], updated: false };
     }
   });
 
