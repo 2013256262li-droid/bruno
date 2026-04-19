@@ -1,11 +1,12 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import {
   updateCookies,
   updatePreferences,
   setGitVersion
 } from 'providers/ReduxStore/slices/app';
 import {
-  addTab
+  addTab,
+  focusTab
 } from 'providers/ReduxStore/slices/tabs';
 import {
   brunoConfigUpdateEvent,
@@ -25,10 +26,11 @@ import {
   streamDataReceived,
   setDotEnvVariables
 } from 'providers/ReduxStore/slices/collections';
-import { collectionAddEnvFileEvent, openCollectionEvent, hydrateCollectionWithUiStateSnapshot, mergeAndPersistEnvironment } from 'providers/ReduxStore/slices/collections/actions';
+import { collectionAddEnvFileEvent, openCollectionEvent, hydrateCollectionWithUiStateSnapshot, mergeAndPersistEnvironment, selectEnvironment } from 'providers/ReduxStore/slices/collections/actions';
 import {
   workspaceOpenedEvent,
-  workspaceConfigUpdatedEvent
+  workspaceConfigUpdatedEvent,
+  restoreSession
 } from 'providers/ReduxStore/slices/workspaces/actions';
 import { workspaceDotEnvUpdateEvent, setWorkspaceDotEnvVariables } from 'providers/ReduxStore/slices/workspaces';
 import toast from 'react-hot-toast';
@@ -39,10 +41,86 @@ import { collectionAddOauth2CredentialsByUrl, collectionClearOauth2CredentialsBy
 import { addLog } from 'providers/ReduxStore/slices/logs';
 import { updateSystemResources } from 'providers/ReduxStore/slices/performance';
 import { apiSpecAddFileEvent, apiSpecChangeFileEvent } from 'providers/ReduxStore/slices/apiSpec';
+import { findItemInCollection } from 'utils/collections';
 
 const useIpcEvents = () => {
   const dispatch = useDispatch();
   const store = useStore();
+
+  const pendingSessionRef = useRef(null);
+  const pendingCollectionUidsRef = useRef(new Set());
+  const sessionRestoredRef = useRef(false);
+
+  const restoreSessionTabsAndEnvironment = (session) => {
+    if (!session || sessionRestoredRef.current) {
+      return;
+    }
+
+    sessionRestoredRef.current = true;
+    const state = store.getState();
+
+    if (session.collections && session.collections.length > 0) {
+      for (const sessionCollection of session.collections) {
+        if (sessionCollection.selectedEnvironmentUid) {
+          const collectionExists = state.collections.collections.find(
+            (c) => c.uid === sessionCollection.uid
+          );
+          if (collectionExists) {
+            dispatch(selectEnvironment(sessionCollection.selectedEnvironmentUid, sessionCollection.uid));
+          }
+        }
+      }
+    }
+
+    if (session.tabs && session.tabs.length > 0) {
+      const currentState = store.getState();
+      const tabsToRestore = [];
+
+      for (const tab of session.tabs) {
+        const collection = currentState.collections.collections.find(
+          (c) => c.uid === tab.collectionUid
+        );
+
+        if (!collection) {
+          continue;
+        }
+
+        if (['workspaceOverview', 'workspaceEnvironments'].includes(tab.type)) {
+          tabsToRestore.push(tab);
+          continue;
+        }
+
+        if (tab.type === 'request' || tab.type === 'grpc-request' || tab.type === 'ws-request' || tab.type === 'graphql-request') {
+          const item = findItemInCollection(collection, tab.uid);
+          if (item) {
+            tabsToRestore.push(tab);
+          }
+          continue;
+        }
+
+        const nonReplaceableTabTypes = [
+          'variables',
+          'collection-runner',
+          'environment-settings',
+          'global-environment-settings',
+          'preferences',
+          'openapi-sync',
+          'openapi-spec'
+        ];
+        if (nonReplaceableTabTypes.includes(tab.type)) {
+          tabsToRestore.push(tab);
+        }
+      }
+
+      for (const tab of tabsToRestore) {
+        dispatch(addTab(tab));
+      }
+
+      if (session.activeTabUid) {
+        dispatch(focusTab({ uid: session.activeTabUid }));
+      }
+    }
+  };
 
   useEffect(() => {
     if (!isElectron()) {
@@ -120,8 +198,51 @@ const useIpcEvents = () => {
 
     const removeApiSpecTreeUpdateListener = ipcRenderer.on('main:apispec-tree-updated', _apiSpecTreeUpdated);
 
-    const removeOpenCollectionListener = ipcRenderer.on('main:collection-opened', (pathname, uid, brunoConfig) => {
-      dispatch(openCollectionEvent(uid, pathname, brunoConfig));
+    const removeOpenCollectionListener = ipcRenderer.on('main:collection-opened', async (pathname, uid, brunoConfig) => {
+      await dispatch(openCollectionEvent(uid, pathname, brunoConfig));
+
+      if (pendingCollectionUidsRef.current.has(uid)) {
+        pendingCollectionUidsRef.current.delete(uid);
+
+        if (pendingCollectionUidsRef.current.size === 0 && pendingSessionRef.current) {
+          restoreSessionTabsAndEnvironment(pendingSessionRef.current);
+          pendingSessionRef.current = null;
+        }
+      }
+    });
+
+    const removeWorkspacesReadyListener = ipcRenderer.on('main:workspaces-ready', async () => {
+      if (sessionRestoredRef.current) {
+        return;
+      }
+
+      const result = await dispatch(restoreSession());
+      if (result.success && result.session) {
+        const session = result.session;
+
+        if (session.collections && session.collections.length > 0) {
+          const currentState = store.getState();
+          const collectionUidsToWait = new Set();
+
+          for (const sessionCollection of session.collections) {
+            const collectionAlreadyLoaded = currentState.collections.collections.find(
+              (c) => c.uid === sessionCollection.uid
+            );
+            if (!collectionAlreadyLoaded) {
+              collectionUidsToWait.add(sessionCollection.uid);
+            }
+          }
+
+          if (collectionUidsToWait.size > 0) {
+            pendingSessionRef.current = session;
+            pendingCollectionUidsRef.current = collectionUidsToWait;
+          } else {
+            restoreSessionTabsAndEnvironment(session);
+          }
+        } else {
+          restoreSessionTabsAndEnvironment(session);
+        }
+      }
     });
 
     const removeOpenWorkspaceListener = ipcRenderer.on('main:workspace-opened', (workspacePath, workspaceUid, workspaceConfig) => {
@@ -342,6 +463,7 @@ const useIpcEvents = () => {
       removeCollectionTreeUpdateListener();
       removeApiSpecTreeUpdateListener();
       removeOpenCollectionListener();
+      removeWorkspacesReadyListener();
       removeOpenWorkspaceListener();
       removeWorkspaceConfigUpdatedListener();
       removeWorkspaceEnvironmentAddedListener();

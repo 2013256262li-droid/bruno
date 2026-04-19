@@ -1135,3 +1135,39 @@ export const cleanupInvalidCollections = (workspaceUid) => {
     }
   };
 };
+
+export const getLastSessionState = () => {
+  return async (dispatch, getState) => {
+    try {
+      const session = await ipcRenderer.invoke('renderer:get-last-session');
+      return session;
+    } catch (error) {
+      console.error('Error getting last session state:', error);
+      return null;
+    }
+  };
+};
+
+export const clearLastSessionState = () => {
+  return async (dispatch, getState) => {
+    try {
+      await ipcRenderer.invoke('renderer:clear-last-session');
+      return { success: true };
+    } catch (error) {
+      console.error('Error clearing last session state:', error);
+      return { success: false };
+    }
+  };
+};
+
+export const restoreSession = () => {
+  return async (dispatch, getState) => {
+    try {
+      const result = await ipcRenderer.invoke('renderer:restore-session');
+      return result;
+    } catch (error) {
+      console.error('Error restoring session:', error);
+      return { success: false, error: error.message, session: null };
+    }
+  };
+};
