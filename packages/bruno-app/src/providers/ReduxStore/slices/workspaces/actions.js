@@ -1171,3 +1171,18 @@ export const restoreSession = () => {
     }
   };
 };
+
+export const cleanupFailedCollections = (collectionPaths, collectionUids) => {
+  return async (dispatch, getState) => {
+    try {
+      const result = await ipcRenderer.invoke('renderer:cleanup-failed-collections', {
+        collectionPaths,
+        collectionUids
+      });
+      return result;
+    } catch (error) {
+      console.error('Error cleaning up failed collections:', error);
+      return { success: false, error: error.message, cleaned: [] };
+    }
+  };
+};

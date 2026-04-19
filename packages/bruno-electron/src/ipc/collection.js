@@ -2495,50 +2495,95 @@ const registerMainEventHandlers = (mainWindow, watcher) => {
       const { session, invalidPaths, hasInvalidPaths } = uiStateSnapshotStore.getLastSessionWithValidation();
 
       if (!session) {
-        return { success: true, session: null, invalidPaths: [], hasInvalidPaths: false };
+        return { 
+          success: true, 
+          session: null, 
+          invalidPaths: [], 
+          hasInvalidPaths: false,
+          openedCollections: [],
+          failedCollections: [],
+          allInvalidPaths: []
+        };
       }
 
-      if (hasInvalidPaths && invalidPaths.length > 0) {
-        const LastOpenedCollections = require('../store/last-opened-collections');
-        const lastOpenedCollections = new LastOpenedCollections();
+      const LastOpenedCollections = require('../store/last-opened-collections');
+      const lastOpenedCollections = new LastOpenedCollections();
 
+      const allInvalidPaths = [...invalidPaths];
+      const openedCollections = [];
+      const failedCollections = [];
+      const openedCollectionPaths = [];
+
+      if (hasInvalidPaths && invalidPaths.length > 0) {
         for (const invalidPath of invalidPaths) {
           lastOpenedCollections.remove(invalidPath);
         }
-
-        const validSession = {
-          ...session,
-          timestamp: session.timestamp || new Date().toISOString()
-        };
-        uiStateSnapshotStore.saveLastSession(validSession);
       }
 
-      const openedCollectionPaths = [];
       if (session.collections && session.collections.length > 0 && watcher && mainWindow) {
-        const collectionPaths = session.collections.map((c) => c.pathname);
+        const collectionsToOpen = [...session.collections];
 
-        for (const collectionPath of collectionPaths) {
+        for (const collection of collectionsToOpen) {
+          const collectionPath = collection.pathname;
           const resolvedPath = path.isAbsolute(collectionPath)
             ? collectionPath
             : path.resolve(collectionPath);
 
-          if (uiStateSnapshotStore.isPathValid(resolvedPath)) {
-            try {
-              await openCollection(mainWindow, watcher, resolvedPath, { dontSendDisplayErrors: true });
-              openedCollectionPaths.push(resolvedPath);
-            } catch (error) {
-              console.error(`Failed to open collection at ${resolvedPath}:`, error);
+          if (!uiStateSnapshotStore.isPathValid(resolvedPath)) {
+            if (!allInvalidPaths.includes(resolvedPath)) {
+              allInvalidPaths.push(resolvedPath);
+              failedCollections.push({
+                path: resolvedPath,
+                uid: collection.uid,
+                name: collection.name,
+                reason: 'path_invalid'
+              });
+              lastOpenedCollections.remove(resolvedPath);
             }
+            continue;
+          }
+
+          try {
+            await openCollection(mainWindow, watcher, resolvedPath, { dontSendDisplayErrors: true });
+            openedCollections.push(collection);
+            openedCollectionPaths.push(resolvedPath);
+          } catch (error) {
+            console.error(`Failed to open collection at ${resolvedPath}:`, error);
+            failedCollections.push({
+              path: resolvedPath,
+              uid: collection.uid,
+              name: collection.name,
+              reason: 'open_failed',
+              error: error.message
+            });
+            allInvalidPaths.push(resolvedPath);
+            lastOpenedCollections.remove(resolvedPath);
           }
         }
       }
 
+      const cleanedSession = {
+        ...session,
+        timestamp: session.timestamp || new Date().toISOString(),
+        collections: openedCollections
+      };
+
+      if (openedCollections.length === 0) {
+        uiStateSnapshotStore.clearLastSession();
+      } else {
+        uiStateSnapshotStore.saveLastSession(cleanedSession);
+      }
+
       return {
         success: true,
-        session,
+        session: cleanedSession,
         invalidPaths,
         hasInvalidPaths,
-        openedCollectionPaths
+        allInvalidPaths,
+        openedCollections,
+        openedCollectionPaths,
+        failedCollections,
+        hasFailedCollections: failedCollections.length > 0
       };
     } catch (error) {
       console.error('Error restoring session:', error);
@@ -2554,8 +2599,73 @@ const registerMainEventHandlers = (mainWindow, watcher) => {
         error: error.message,
         session: null,
         invalidPaths: [],
-        hasInvalidPaths: false
+        hasInvalidPaths: false,
+        allInvalidPaths: [],
+        openedCollections: [],
+        openedCollectionPaths: [],
+        failedCollections: [],
+        hasFailedCollections: false
       };
+    }
+  });
+
+  ipcMain.handle('renderer:cleanup-failed-collections', async (event, { collectionPaths, collectionUids }) => {
+    try {
+      if (!collectionPaths && !collectionUids) {
+        return { success: true, cleaned: [] };
+      }
+
+      const pathsToClean = [];
+
+      if (collectionPaths && Array.isArray(collectionPaths)) {
+        pathsToClean.push(...collectionPaths);
+      }
+
+      if (pathsToClean.length === 0) {
+        return { success: true, cleaned: [] };
+      }
+
+      const LastOpenedCollections = require('../store/last-opened-collections');
+      const lastOpenedCollections = new LastOpenedCollections();
+
+      const cleanedPaths = [];
+
+      for (const pathToClean of pathsToClean) {
+        const resolvedPath = path.isAbsolute(pathToClean)
+          ? pathToClean
+          : path.resolve(pathToClean);
+
+        lastOpenedCollections.remove(resolvedPath);
+        cleanedPaths.push(resolvedPath);
+      }
+
+      const { session } = uiStateSnapshotStore.getLastSessionWithValidation();
+      if (session && session.collections) {
+        const cleanedCollections = session.collections.filter((c) => {
+          const collectionPath = path.isAbsolute(c.pathname)
+            ? c.pathname
+            : path.resolve(c.pathname);
+          return !cleanedPaths.includes(collectionPath);
+        });
+
+        if (cleanedCollections.length === 0) {
+          uiStateSnapshotStore.clearLastSession();
+        } else {
+          const cleanedSession = {
+            ...session,
+            collections: cleanedCollections,
+            tabs: session.tabs?.filter((t) => 
+              cleanedCollections.some((c) => c.uid === t.collectionUid)
+            ) || []
+          };
+          uiStateSnapshotStore.saveLastSession(cleanedSession);
+        }
+      }
+
+      return { success: true, cleaned: cleanedPaths };
+    } catch (error) {
+      console.error('Error cleaning up failed collections:', error);
+      return { success: false, error: error.message, cleaned: [] };
     }
   });
 

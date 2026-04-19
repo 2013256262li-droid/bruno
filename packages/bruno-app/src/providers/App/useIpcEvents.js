@@ -38,7 +38,8 @@ import {
   workspaceConfigUpdatedEvent,
   restoreSession,
   getLastSessionState,
-  clearLastSessionState
+  clearLastSessionState,
+  cleanupFailedCollections
 } from 'providers/ReduxStore/slices/workspaces/actions';
 import { workspaceDotEnvUpdateEvent, setWorkspaceDotEnvVariables } from 'providers/ReduxStore/slices/workspaces';
 import toast from 'react-hot-toast';
@@ -59,22 +60,53 @@ const useIpcEvents = () => {
     isRestoring: false,
     hasRestored: false,
     pendingSession: null,
+    pendingCollections: [],
     pendingCollectionUids: new Set(),
-    restoreTimeoutId: null
+    openedCollectionUids: new Set(),
+    restoreTimeoutId: null,
+    failedCollectionPaths: [],
+    allCollectionPaths: []
   });
 
   const clearSessionRestoreState = () => {
     const state = sessionStateRef.current;
     state.isRestoring = false;
     state.pendingSession = null;
+    state.pendingCollections = [];
     state.pendingCollectionUids = new Set();
+    state.openedCollectionUids = new Set();
+    state.failedCollectionPaths = [];
+    state.allCollectionPaths = [];
     if (state.restoreTimeoutId) {
       clearTimeout(state.restoreTimeoutId);
       state.restoreTimeoutId = null;
     }
   };
 
-  const restoreSessionTabsAndEnvironment = (session) => {
+  const cleanupUnopenedCollections = async () => {
+    const state = sessionStateRef.current;
+
+    const unopenedPaths = [];
+
+    for (const collection of state.pendingCollections) {
+      if (!state.openedCollectionUids.has(collection.uid)) {
+        unopenedPaths.push(collection.pathname);
+      }
+    }
+
+    if (unopenedPaths.length > 0) {
+      console.warn('Cleaning up unopened collections:', unopenedPaths);
+      try {
+        await dispatch(cleanupFailedCollections(unopenedPaths));
+      } catch (error) {
+        console.error('Failed to cleanup unopened collections:', error);
+      }
+    }
+
+    return unopenedPaths;
+  };
+
+  const restoreSessionTabsAndEnvironment = (session, openedCollectionUids) => {
     const state = sessionStateRef.current;
 
     if (!session || state.hasRestored) {
@@ -83,12 +115,17 @@ const useIpcEvents = () => {
     }
 
     state.hasRestored = true;
-    clearSessionRestoreState();
+
+    const openedUids = openedCollectionUids || state.openedCollectionUids;
 
     const currentState = store.getState();
 
     if (session.collections && session.collections.length > 0) {
       for (const sessionCollection of session.collections) {
+        if (!openedUids.has(sessionCollection.uid)) {
+          continue;
+        }
+
         if (sessionCollection.selectedEnvironmentUid) {
           const collectionExists = currentState.collections.collections.find(
             (c) => c.uid === sessionCollection.uid
@@ -105,6 +142,10 @@ const useIpcEvents = () => {
       const tabsToRestore = [];
 
       for (const tab of session.tabs) {
+        if (!openedUids.has(tab.collectionUid)) {
+          continue;
+        }
+
         const collection = latestState.collections.collections.find(
           (c) => c.uid === tab.collectionUid
         );
@@ -144,10 +185,12 @@ const useIpcEvents = () => {
         dispatch(addTab(tab));
       }
 
-      if (session.activeTabUid) {
+      if (session.activeTabUid && openedUids.has(session.activeTabUid)) {
         dispatch(focusTab({ uid: session.activeTabUid }));
       }
     }
+
+    clearSessionRestoreState();
   };
 
   useEffect(() => {
@@ -232,9 +275,10 @@ const useIpcEvents = () => {
       const state = sessionStateRef.current;
       if (state.isRestoring && state.pendingCollectionUids.has(uid)) {
         state.pendingCollectionUids.delete(uid);
+        state.openedCollectionUids.add(uid);
 
         if (state.pendingCollectionUids.size === 0 && state.pendingSession) {
-          restoreSessionTabsAndEnvironment(state.pendingSession);
+          restoreSessionTabsAndEnvironment(state.pendingSession, state.openedCollectionUids);
         }
       }
     });
@@ -269,8 +313,13 @@ const useIpcEvents = () => {
           return;
         }
 
-        if (result.hasInvalidPaths && result.invalidPaths && result.invalidPaths.length > 0) {
-          console.warn('Found invalid collection paths during session restore:', result.invalidPaths);
+        if (result.hasFailedCollections && result.failedCollections && result.failedCollections.length > 0) {
+          console.warn('Found failed collections during session restore:', result.failedCollections);
+          state.failedCollectionPaths = result.failedCollections.map((c) => c.path);
+        }
+
+        if (result.hasInvalidPaths && result.allInvalidPaths && result.allInvalidPaths.length > 0) {
+          console.warn('Found invalid collection paths during session restore:', result.allInvalidPaths);
         }
 
         if (!session.collections || session.collections.length === 0) {
@@ -278,8 +327,11 @@ const useIpcEvents = () => {
           return;
         }
 
+        state.allCollectionPaths = session.collections.map((c) => c.pathname);
+
         const currentState = store.getState();
         const collectionUidsToWait = new Set();
+        const collectionsToWait = [];
 
         for (const sessionCollection of session.collections) {
           const collectionAlreadyLoaded = currentState.collections.collections.find(
@@ -287,21 +339,32 @@ const useIpcEvents = () => {
           );
           if (!collectionAlreadyLoaded) {
             collectionUidsToWait.add(sessionCollection.uid);
+            collectionsToWait.push(sessionCollection);
+          } else {
+            state.openedCollectionUids.add(sessionCollection.uid);
           }
         }
 
         if (collectionUidsToWait.size > 0) {
           state.pendingSession = session;
           state.pendingCollectionUids = collectionUidsToWait;
+          state.pendingCollections = collectionsToWait;
 
-          state.restoreTimeoutId = setTimeout(() => {
+          state.restoreTimeoutId = setTimeout(async () => {
             console.warn('Session restore timeout - some collections may not have loaded');
-            if (state.pendingSession) {
-              restoreSessionTabsAndEnvironment(state.pendingSession);
+
+            if (!state.hasRestored) {
+              await cleanupUnopenedCollections();
+
+              if (state.pendingSession && state.openedCollectionUids.size > 0) {
+                restoreSessionTabsAndEnvironment(state.pendingSession, state.openedCollectionUids);
+              } else {
+                clearSessionRestoreState();
+              }
             }
           }, 10000);
         } else {
-          restoreSessionTabsAndEnvironment(session);
+          restoreSessionTabsAndEnvironment(session, state.openedCollectionUids);
         }
       } catch (error) {
         console.error('Unexpected error during session restore:', error);
