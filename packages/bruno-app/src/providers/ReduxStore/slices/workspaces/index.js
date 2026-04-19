@@ -126,6 +126,29 @@ export const workspacesSlice = createSlice({
         workspace.scratchCollectionUid = scratchCollectionUid;
         workspace.scratchTempDirectory = scratchTempDirectory;
       }
+    },
+
+    // Update a single collection's properties in workspace (pinned, lastOpenedAt, etc.)
+    updateCollectionInWorkspace: (state, action) => {
+      const { workspaceUid, collectionPath, updates } = action.payload;
+      const workspace = state.workspaces.find((w) => w.uid === workspaceUid);
+      if (workspace?.collections) {
+        const normalizedPath = normalizePath(collectionPath);
+        const collection = workspace.collections.find((c) => normalizePath(c.path) === normalizedPath);
+        if (collection) {
+          Object.assign(collection, updates);
+        }
+      }
+    },
+
+    // Remove invalid collections from workspace
+    removeInvalidCollectionsFromWorkspace: (state, action) => {
+      const { workspaceUid, invalidCollectionPaths } = action.payload;
+      const workspace = state.workspaces.find((w) => w.uid === workspaceUid);
+      if (workspace?.collections) {
+        const normalizedInvalidPaths = new Set(invalidCollectionPaths.map((p) => normalizePath(p)));
+        workspace.collections = workspace.collections.filter((c) => !normalizedInvalidPaths.has(normalizePath(c.path)));
+      }
     }
   }
 });
@@ -140,7 +163,9 @@ export const {
   updateWorkspaceLoadingState,
   workspaceDotEnvUpdateEvent,
   setWorkspaceDotEnvVariables,
-  setWorkspaceScratchCollection
+  setWorkspaceScratchCollection,
+  updateCollectionInWorkspace,
+  removeInvalidCollectionsFromWorkspace
 } = workspacesSlice.actions;
 
 export default workspacesSlice.reducer;
