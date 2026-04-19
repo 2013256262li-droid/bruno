@@ -2460,6 +2460,105 @@ const registerMainEventHandlers = (mainWindow, watcher) => {
     }
   });
 
+  ipcMain.handle('renderer:save-session-state', (event, sessionState) => {
+    try {
+      uiStateSnapshotStore.saveLastSession(sessionState);
+      return { success: true };
+    } catch (error) {
+      console.error('Error saving session state:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('renderer:get-last-session', (event) => {
+    try {
+      const session = uiStateSnapshotStore.getLastSession();
+      return session;
+    } catch (error) {
+      console.error('Error getting last session:', error);
+      return null;
+    }
+  });
+
+  ipcMain.handle('renderer:clear-last-session', (event) => {
+    try {
+      uiStateSnapshotStore.clearLastSession();
+      return { success: true };
+    } catch (error) {
+      console.error('Error clearing last session:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('renderer:restore-session', async (event) => {
+    try {
+      const { session, invalidPaths, hasInvalidPaths } = uiStateSnapshotStore.getLastSessionWithValidation();
+
+      if (!session) {
+        return { success: true, session: null, invalidPaths: [], hasInvalidPaths: false };
+      }
+
+      if (hasInvalidPaths && invalidPaths.length > 0) {
+        const LastOpenedCollections = require('../store/last-opened-collections');
+        const lastOpenedCollections = new LastOpenedCollections();
+
+        for (const invalidPath of invalidPaths) {
+          lastOpenedCollections.remove(invalidPath);
+        }
+
+        const validSession = {
+          ...session,
+          timestamp: session.timestamp || new Date().toISOString()
+        };
+        uiStateSnapshotStore.saveLastSession(validSession);
+      }
+
+      const openedCollectionPaths = [];
+      if (session.collections && session.collections.length > 0 && watcher && mainWindow) {
+        const collectionPaths = session.collections.map((c) => c.pathname);
+
+        for (const collectionPath of collectionPaths) {
+          const resolvedPath = path.isAbsolute(collectionPath)
+            ? collectionPath
+            : path.resolve(collectionPath);
+
+          if (uiStateSnapshotStore.isPathValid(resolvedPath)) {
+            try {
+              await openCollection(mainWindow, watcher, resolvedPath, { dontSendDisplayErrors: true });
+              openedCollectionPaths.push(resolvedPath);
+            } catch (error) {
+              console.error(`Failed to open collection at ${resolvedPath}:`, error);
+            }
+          }
+        }
+      }
+
+      return {
+        success: true,
+        session,
+        invalidPaths,
+        hasInvalidPaths,
+        openedCollectionPaths
+      };
+    } catch (error) {
+      console.error('Error restoring session:', error);
+
+      try {
+        uiStateSnapshotStore.clearLastSession();
+      } catch (clearError) {
+        console.error('Error clearing dirty session:', clearError);
+      }
+
+      return {
+        success: false,
+        error: error.message,
+        session: null,
+        invalidPaths: [],
+        hasInvalidPaths: false
+      };
+    }
+  });
+
   // The app listen for this event and allows the user to save unsaved requests before closing the app
   ipcMain.on('main:start-quit-flow', () => {
     mainWindow.webContents.send('main:start-quit-flow');

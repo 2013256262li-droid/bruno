@@ -1,11 +1,12 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import {
   updateCookies,
   updatePreferences,
   setGitVersion
 } from 'providers/ReduxStore/slices/app';
 import {
-  addTab
+  addTab,
+  focusTab
 } from 'providers/ReduxStore/slices/tabs';
 import {
   brunoConfigUpdateEvent,
@@ -25,10 +26,19 @@ import {
   streamDataReceived,
   setDotEnvVariables
 } from 'providers/ReduxStore/slices/collections';
-import { collectionAddEnvFileEvent, openCollectionEvent, hydrateCollectionWithUiStateSnapshot, mergeAndPersistEnvironment } from 'providers/ReduxStore/slices/collections/actions';
+import {
+  collectionAddEnvFileEvent,
+  openCollectionEvent,
+  hydrateCollectionWithUiStateSnapshot,
+  mergeAndPersistEnvironment,
+  selectEnvironment
+} from 'providers/ReduxStore/slices/collections/actions';
 import {
   workspaceOpenedEvent,
-  workspaceConfigUpdatedEvent
+  workspaceConfigUpdatedEvent,
+  restoreSession,
+  getLastSessionState,
+  clearLastSessionState
 } from 'providers/ReduxStore/slices/workspaces/actions';
 import { workspaceDotEnvUpdateEvent, setWorkspaceDotEnvVariables } from 'providers/ReduxStore/slices/workspaces';
 import toast from 'react-hot-toast';
@@ -39,10 +49,106 @@ import { collectionAddOauth2CredentialsByUrl, collectionClearOauth2CredentialsBy
 import { addLog } from 'providers/ReduxStore/slices/logs';
 import { updateSystemResources } from 'providers/ReduxStore/slices/performance';
 import { apiSpecAddFileEvent, apiSpecChangeFileEvent } from 'providers/ReduxStore/slices/apiSpec';
+import { findItemInCollection } from 'utils/collections';
 
 const useIpcEvents = () => {
   const dispatch = useDispatch();
   const store = useStore();
+
+  const sessionStateRef = useRef({
+    isRestoring: false,
+    hasRestored: false,
+    pendingSession: null,
+    pendingCollectionUids: new Set(),
+    restoreTimeoutId: null
+  });
+
+  const clearSessionRestoreState = () => {
+    const state = sessionStateRef.current;
+    state.isRestoring = false;
+    state.pendingSession = null;
+    state.pendingCollectionUids = new Set();
+    if (state.restoreTimeoutId) {
+      clearTimeout(state.restoreTimeoutId);
+      state.restoreTimeoutId = null;
+    }
+  };
+
+  const restoreSessionTabsAndEnvironment = (session) => {
+    const state = sessionStateRef.current;
+
+    if (!session || state.hasRestored) {
+      clearSessionRestoreState();
+      return;
+    }
+
+    state.hasRestored = true;
+    clearSessionRestoreState();
+
+    const currentState = store.getState();
+
+    if (session.collections && session.collections.length > 0) {
+      for (const sessionCollection of session.collections) {
+        if (sessionCollection.selectedEnvironmentUid) {
+          const collectionExists = currentState.collections.collections.find(
+            (c) => c.uid === sessionCollection.uid
+          );
+          if (collectionExists) {
+            dispatch(selectEnvironment(sessionCollection.selectedEnvironmentUid, sessionCollection.uid));
+          }
+        }
+      }
+    }
+
+    if (session.tabs && session.tabs.length > 0) {
+      const latestState = store.getState();
+      const tabsToRestore = [];
+
+      for (const tab of session.tabs) {
+        const collection = latestState.collections.collections.find(
+          (c) => c.uid === tab.collectionUid
+        );
+
+        if (!collection) {
+          continue;
+        }
+
+        if (['workspaceOverview', 'workspaceEnvironments'].includes(tab.type)) {
+          tabsToRestore.push(tab);
+          continue;
+        }
+
+        if (tab.type === 'request' || tab.type === 'grpc-request' || tab.type === 'ws-request' || tab.type === 'graphql-request') {
+          const item = findItemInCollection(collection, tab.uid);
+          if (item) {
+            tabsToRestore.push(tab);
+          }
+          continue;
+        }
+
+        const nonReplaceableTabTypes = [
+          'variables',
+          'collection-runner',
+          'environment-settings',
+          'global-environment-settings',
+          'preferences',
+          'openapi-sync',
+          'openapi-spec'
+        ];
+        if (nonReplaceableTabTypes.includes(tab.type)) {
+          tabsToRestore.push(tab);
+        }
+      }
+
+      for (const tab of tabsToRestore) {
+        dispatch(addTab(tab));
+      }
+
+      if (session.activeTabUid) {
+        dispatch(focusTab({ uid: session.activeTabUid }));
+      }
+    }
+  };
 
   useEffect(() => {
     if (!isElectron()) {
@@ -120,8 +226,92 @@ const useIpcEvents = () => {
 
     const removeApiSpecTreeUpdateListener = ipcRenderer.on('main:apispec-tree-updated', _apiSpecTreeUpdated);
 
-    const removeOpenCollectionListener = ipcRenderer.on('main:collection-opened', (pathname, uid, brunoConfig) => {
-      dispatch(openCollectionEvent(uid, pathname, brunoConfig));
+    const removeOpenCollectionListener = ipcRenderer.on('main:collection-opened', async (pathname, uid, brunoConfig) => {
+      await dispatch(openCollectionEvent(uid, pathname, brunoConfig));
+
+      const state = sessionStateRef.current;
+      if (state.isRestoring && state.pendingCollectionUids.has(uid)) {
+        state.pendingCollectionUids.delete(uid);
+
+        if (state.pendingCollectionUids.size === 0 && state.pendingSession) {
+          restoreSessionTabsAndEnvironment(state.pendingSession);
+        }
+      }
+    });
+
+    const removeWorkspacesReadyListener = ipcRenderer.on('main:workspaces-ready', async () => {
+      const state = sessionStateRef.current;
+
+      if (state.hasRestored || state.isRestoring) {
+        return;
+      }
+
+      state.isRestoring = true;
+
+      try {
+        const result = await dispatch(restoreSession());
+
+        if (!result.success) {
+          console.error('Session restoration failed:', result.error);
+          try {
+            await dispatch(clearLastSessionState());
+          } catch (clearError) {
+            console.error('Failed to clear dirty session:', clearError);
+          }
+          clearSessionRestoreState();
+          return;
+        }
+
+        const session = result.session;
+
+        if (!session) {
+          clearSessionRestoreState();
+          return;
+        }
+
+        if (result.hasInvalidPaths && result.invalidPaths && result.invalidPaths.length > 0) {
+          console.warn('Found invalid collection paths during session restore:', result.invalidPaths);
+        }
+
+        if (!session.collections || session.collections.length === 0) {
+          clearSessionRestoreState();
+          return;
+        }
+
+        const currentState = store.getState();
+        const collectionUidsToWait = new Set();
+
+        for (const sessionCollection of session.collections) {
+          const collectionAlreadyLoaded = currentState.collections.collections.find(
+            (c) => c.uid === sessionCollection.uid
+          );
+          if (!collectionAlreadyLoaded) {
+            collectionUidsToWait.add(sessionCollection.uid);
+          }
+        }
+
+        if (collectionUidsToWait.size > 0) {
+          state.pendingSession = session;
+          state.pendingCollectionUids = collectionUidsToWait;
+
+          state.restoreTimeoutId = setTimeout(() => {
+            console.warn('Session restore timeout - some collections may not have loaded');
+            if (state.pendingSession) {
+              restoreSessionTabsAndEnvironment(state.pendingSession);
+            }
+          }, 10000);
+        } else {
+          restoreSessionTabsAndEnvironment(session);
+        }
+      } catch (error) {
+        console.error('Unexpected error during session restore:', error);
+        try {
+          await dispatch(clearLastSessionState());
+        } catch (clearError) {
+          console.error('Failed to clear dirty session:', clearError);
+        }
+        clearSessionRestoreState();
+      }
     });
 
     const removeOpenWorkspaceListener = ipcRenderer.on('main:workspace-opened', (workspacePath, workspaceUid, workspaceConfig) => {
@@ -339,9 +529,11 @@ const useIpcEvents = () => {
     });
 
     return () => {
+      clearSessionRestoreState();
       removeCollectionTreeUpdateListener();
       removeApiSpecTreeUpdateListener();
       removeOpenCollectionListener();
+      removeWorkspacesReadyListener();
       removeOpenWorkspaceListener();
       removeWorkspaceConfigUpdatedListener();
       removeWorkspaceEnvironmentAddedListener();

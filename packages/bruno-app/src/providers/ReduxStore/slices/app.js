@@ -283,7 +283,49 @@ export const createCookieString = (cookieObj) => () => {
 
 export const completeQuitFlow = () => (dispatch, getState) => {
   const { ipcRenderer } = window;
-  return ipcRenderer.invoke('main:complete-quit-flow');
+  const state = getState();
+
+  try {
+    const sessionState = {
+      timestamp: new Date().toISOString(),
+      tabs: state.tabs?.tabs || [],
+      activeTabUid: state.tabs?.activeTabUid || null,
+      workspaces: {
+        activeWorkspaceUid: state.workspaces?.activeWorkspaceUid || null,
+        workspaces: state.workspaces?.workspaces?.map((w) => ({
+          uid: w.uid,
+          name: w.name,
+          pathname: w.pathname,
+          type: w.type,
+          collections: w.collections?.map((c) => ({
+            name: c.name,
+            path: c.path,
+            pinned: c.pinned,
+            lastOpenedAt: c.lastOpenedAt
+          })) || []
+        })) || []
+      },
+      collections: state.collections?.collections?.map((c) => ({
+        uid: c.uid,
+        name: c.name,
+        pathname: c.pathname,
+        selectedEnvironmentUid: c.selectedEnvironmentUid
+      })) || []
+    };
+
+    return ipcRenderer
+      .invoke('renderer:save-session-state', sessionState)
+      .then(() => {
+        return ipcRenderer.invoke('main:complete-quit-flow');
+      })
+      .catch((error) => {
+        console.error('Error saving session state before quit:', error);
+        return ipcRenderer.invoke('main:complete-quit-flow');
+      });
+  } catch (error) {
+    console.error('Error preparing session state:', error);
+    return ipcRenderer.invoke('main:complete-quit-flow');
+  }
 };
 
 export const copyRequest = (item) => (dispatch, getState) => {
