@@ -6,7 +6,9 @@ import {
   updateWorkspace,
   removeCollectionFromWorkspace,
   updateWorkspaceLoadingState,
-  setWorkspaceScratchCollection
+  setWorkspaceScratchCollection,
+  updateCollectionInWorkspace,
+  removeInvalidCollectionsFromWorkspace
 } from '../workspaces';
 import { createCollection, openCollection, openMultipleCollections, openScratchCollectionEvent } from '../collections/actions';
 import { removeCollection, addTransientDirectory, updateCollectionMountStatus } from '../collections';
@@ -1028,6 +1030,108 @@ export const mountScratchCollection = (workspaceUid) => {
         dispatch(updateCollectionMountStatus({ collectionUid: workspace.scratchCollectionUid, mountStatus: 'unmounted' }));
       }
       return null;
+    }
+  };
+};
+
+export const pinCollection = (workspaceUid, collectionPath, pinned = true) => {
+  return async (dispatch, getState) => {
+    try {
+      const state = getState();
+      const workspace = state.workspaces.workspaces.find((w) => w.uid === workspaceUid);
+
+      if (!workspace?.pathname) {
+        throw new Error('Workspace path not found');
+      }
+
+      const result = await ipcRenderer.invoke('renderer:pin-collection', workspace.pathname, collectionPath, pinned);
+
+      dispatch(updateCollectionInWorkspace({
+        workspaceUid,
+        collectionPath,
+        updates: { pinned: result.pinned }
+      }));
+
+      return result;
+    } catch (error) {
+      console.error('Error pinning collection:', error);
+      throw error;
+    }
+  };
+};
+
+export const updateCollectionLastOpened = (workspaceUid, collectionPath) => {
+  return async (dispatch, getState) => {
+    try {
+      const state = getState();
+      const workspace = state.workspaces.workspaces.find((w) => w.uid === workspaceUid);
+
+      if (!workspace?.pathname) {
+        return { success: false };
+      }
+
+      const result = await ipcRenderer.invoke('renderer:update-collection-last-opened', workspace.pathname, collectionPath);
+
+      if (result.success) {
+        dispatch(updateCollectionInWorkspace({
+          workspaceUid,
+          collectionPath,
+          updates: { lastOpenedAt: new Date().toISOString() }
+        }));
+      }
+
+      return result;
+    } catch (error) {
+      console.error('Error updating collection last opened time:', error);
+      return { success: false };
+    }
+  };
+};
+
+export const getInvalidCollections = (workspaceUid) => {
+  return async (dispatch, getState) => {
+    try {
+      const state = getState();
+      const workspace = state.workspaces.workspaces.find((w) => w.uid === workspaceUid);
+
+      if (!workspace?.pathname) {
+        throw new Error('Workspace path not found');
+      }
+
+      const invalidCollections = await ipcRenderer.invoke('renderer:get-invalid-collections', workspace.pathname);
+
+      return invalidCollections;
+    } catch (error) {
+      console.error('Error getting invalid collections:', error);
+      throw error;
+    }
+  };
+};
+
+export const cleanupInvalidCollections = (workspaceUid) => {
+  return async (dispatch, getState) => {
+    try {
+      const state = getState();
+      const workspace = state.workspaces.workspaces.find((w) => w.uid === workspaceUid);
+
+      if (!workspace?.pathname) {
+        throw new Error('Workspace path not found');
+      }
+
+      const result = await ipcRenderer.invoke('renderer:cleanup-invalid-collections', workspace.pathname);
+
+      if (result.success && result.removed?.length > 0) {
+        const invalidPaths = result.removed.map((c) => c.path);
+        dispatch(removeInvalidCollectionsFromWorkspace({
+          workspaceUid,
+          invalidCollectionPaths: invalidPaths
+        }));
+      }
+
+      return result;
+    } catch (error) {
+      console.error('Error cleaning up invalid collections:', error);
+      throw error;
     }
   };
 };

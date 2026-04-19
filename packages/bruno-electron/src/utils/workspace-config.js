@@ -104,6 +104,14 @@ const sanitizeCollections = (collections) => {
       sanitized.remote = collection.remote.trim();
     }
 
+    if (collection.pinned === true) {
+      sanitized.pinned = true;
+    }
+
+    if (collection.lastOpenedAt && typeof collection.lastOpenedAt === 'string') {
+      sanitized.lastOpenedAt = collection.lastOpenedAt;
+    }
+
     return sanitized;
   });
 };
@@ -243,6 +251,12 @@ const generateYamlContent = (config) => {
       yamlLines.push(`    path: ${quoteYamlValue(collection.path)}`);
       if (collection.remote) {
         yamlLines.push(`    remote: ${quoteYamlValue(collection.remote)}`);
+      }
+      if (collection.pinned === true) {
+        yamlLines.push(`    pinned: true`);
+      }
+      if (collection.lastOpenedAt) {
+        yamlLines.push(`    lastOpenedAt: ${quoteYamlValue(collection.lastOpenedAt)}`);
       }
     }
   } else {
@@ -549,6 +563,112 @@ const removeApiSpecFromWorkspace = async (workspacePath, apiSpecPath) => {
   });
 };
 
+const pinCollectionInWorkspace = async (workspacePath, collectionPath, pinned = true) => {
+  return withLock(getWorkspaceLockKey(workspacePath), async () => {
+    const config = readWorkspaceConfig(workspacePath);
+
+    if (!config.collections) {
+      config.collections = [];
+    }
+
+    const targetPath = posixifyPath(path.normalize(collectionPath));
+    const collectionIndex = config.collections.findIndex((c) => {
+      const collectionPathFromConfig = c.path ? posixifyPath(getNormalizedAbsoluteCollectionPath(workspacePath, c)) : c.path;
+      return collectionPathFromConfig && posixifyPath(path.normalize(collectionPathFromConfig)) === targetPath;
+    });
+
+    if (collectionIndex >= 0) {
+      if (pinned) {
+        config.collections[collectionIndex].pinned = true;
+      } else {
+        delete config.collections[collectionIndex].pinned;
+      }
+    }
+
+    const yamlContent = generateYamlContent(config);
+    await writeWorkspaceFileAtomic(workspacePath, yamlContent);
+
+    return config;
+  });
+};
+
+const updateCollectionLastOpenedAt = async (workspacePath, collectionPath) => {
+  return withLock(getWorkspaceLockKey(workspacePath), async () => {
+    const config = readWorkspaceConfig(workspacePath);
+
+    if (!config.collections) {
+      config.collections = [];
+    }
+
+    const targetPath = posixifyPath(path.normalize(collectionPath));
+    const collectionIndex = config.collections.findIndex((c) => {
+      const collectionPathFromConfig = c.path ? posixifyPath(getNormalizedAbsoluteCollectionPath(workspacePath, c)) : c.path;
+      return collectionPathFromConfig && posixifyPath(path.normalize(collectionPathFromConfig)) === targetPath;
+    });
+
+    if (collectionIndex >= 0) {
+      config.collections[collectionIndex].lastOpenedAt = new Date().toISOString();
+    }
+
+    const yamlContent = generateYamlContent(config);
+    await writeWorkspaceFileAtomic(workspacePath, yamlContent);
+
+    return config;
+  });
+};
+
+const getInvalidWorkspaceCollections = (workspacePath) => {
+  const config = readWorkspaceConfig(workspacePath);
+  const collections = config.collections || [];
+
+  return collections
+    .map((collection) => {
+      const collectionPath = collection.path ? posixifyPath(collection.path) : collection.path;
+      if (collectionPath && !path.isAbsolute(collectionPath)) {
+        return {
+          ...collection,
+          path: path.resolve(workspacePath, collectionPath)
+        };
+      }
+      return { ...collection, path: collectionPath };
+    })
+    .filter((collection) => {
+      if (!collection.path) {
+        return false;
+      }
+      return !isValidCollectionDirectory(collection.path);
+    });
+};
+
+const removeInvalidCollectionsFromWorkspace = async (workspacePath) => {
+  return withLock(getWorkspaceLockKey(workspacePath), async () => {
+    const config = readWorkspaceConfig(workspacePath);
+
+    if (!config.collections || !Array.isArray(config.collections)) {
+      return { removed: [], updatedConfig: config };
+    }
+
+    const removedCollections = [];
+    config.collections = config.collections.filter((collection) => {
+      const collectionPath = collection.path ? getNormalizedAbsoluteCollectionPath(workspacePath, collection) : null;
+
+      if (!collectionPath || !isValidCollectionDirectory(collectionPath)) {
+        removedCollections.push(collection);
+        return false;
+      }
+      return true;
+    });
+
+    const yamlContent = generateYamlContent(config);
+    await writeWorkspaceFileAtomic(workspacePath, yamlContent);
+
+    return {
+      removed: removedCollections,
+      updatedConfig: config
+    };
+  });
+};
+
 const getWorkspaceUid = (workspacePath) => {
   const { defaultWorkspaceManager } = require('../store/default-workspace');
   const defaultWorkspacePath = defaultWorkspaceManager.getDefaultWorkspacePath();
@@ -580,5 +700,9 @@ module.exports = {
   getWorkspaceUid,
   writeWorkspaceFileAtomic,
   isValidCollectionEntry,
-  isValidSpecEntry
+  isValidSpecEntry,
+  pinCollectionInWorkspace,
+  updateCollectionLastOpenedAt,
+  getInvalidWorkspaceCollections,
+  removeInvalidCollectionsFromWorkspace
 };

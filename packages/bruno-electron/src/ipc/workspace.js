@@ -26,7 +26,11 @@ const {
   normalizeCollectionEntry,
   validateWorkspacePath,
   validateWorkspaceDirectory,
-  getWorkspaceUid
+  getWorkspaceUid,
+  pinCollectionInWorkspace,
+  updateCollectionLastOpenedAt,
+  getInvalidWorkspaceCollections,
+  removeInvalidCollectionsFromWorkspace
 } = require('../utils/workspace-config');
 
 const { isValidCollectionDirectory } = require('../utils/filesystem');
@@ -635,6 +639,82 @@ const registerWorkspaceIpc = (mainWindow, workspaceWatcher) => {
     } catch (error) {
       console.error('Error getting default workspace:', error);
       return null;
+    }
+  });
+
+  ipcMain.handle('renderer:pin-collection', async (event, workspacePath, collectionPath, pinned = true) => {
+    try {
+      if (!workspacePath) {
+        throw new Error('Workspace path is required');
+      }
+      if (!collectionPath) {
+        throw new Error('Collection path is required');
+      }
+
+      await pinCollectionInWorkspace(workspacePath, collectionPath, pinned);
+
+      const workspaceConfig = readWorkspaceConfig(workspacePath);
+      const workspaceUid = getWorkspaceUid(workspacePath);
+      const isDefault = workspaceUid === 'default';
+      const configForClient = prepareWorkspaceConfigForClient(workspaceConfig, workspacePath, isDefault);
+      mainWindow.webContents.send('main:workspace-config-updated', workspacePath, workspaceUid, configForClient);
+
+      return { success: true, pinned };
+    } catch (error) {
+      console.error('Error pinning collection:', error);
+      throw error;
+    }
+  });
+
+  ipcMain.handle('renderer:update-collection-last-opened', async (event, workspacePath, collectionPath) => {
+    try {
+      if (!workspacePath || !collectionPath) {
+        return { success: false };
+      }
+
+      await updateCollectionLastOpenedAt(workspacePath, collectionPath);
+      return { success: true };
+    } catch (error) {
+      console.error('Error updating collection last opened time:', error);
+      return { success: false };
+    }
+  });
+
+  ipcMain.handle('renderer:get-invalid-collections', async (event, workspacePath) => {
+    try {
+      if (!workspacePath) {
+        throw new Error('Workspace path is required');
+      }
+
+      const invalidCollections = getInvalidWorkspaceCollections(workspacePath);
+      return invalidCollections;
+    } catch (error) {
+      console.error('Error getting invalid collections:', error);
+      throw error;
+    }
+  });
+
+  ipcMain.handle('renderer:cleanup-invalid-collections', async (event, workspacePath) => {
+    try {
+      if (!workspacePath) {
+        throw new Error('Workspace path is required');
+      }
+
+      const result = await removeInvalidCollectionsFromWorkspace(workspacePath);
+
+      const workspaceConfig = result.updatedConfig;
+      const workspaceUid = getWorkspaceUid(workspacePath);
+      const isDefault = workspaceUid === 'default';
+      const configForClient = prepareWorkspaceConfigForClient(workspaceConfig, workspacePath, isDefault);
+      mainWindow.webContents.send('main:workspace-config-updated', workspacePath, workspaceUid, configForClient);
+
+      return {
+        success: true,
+        removed: result.removed
+      };
+    } catch (error) {
+      console.error('Error cleaning up invalid collections:', error);
+      throw error;
     }
   });
 
