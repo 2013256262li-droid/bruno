@@ -2460,6 +2460,55 @@ const registerMainEventHandlers = (mainWindow, watcher) => {
     }
   });
 
+  ipcMain.handle('renderer:save-session-state', (event, sessionState) => {
+    try {
+      uiStateSnapshotStore.saveLastSession(sessionState);
+      return { success: true };
+    } catch (error) {
+      console.error('Error saving session state:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('renderer:get-last-session', (event) => {
+    try {
+      const session = uiStateSnapshotStore.getLastSession();
+      return session;
+    } catch (error) {
+      console.error('Error getting last session:', error);
+      return null;
+    }
+  });
+
+  ipcMain.handle('renderer:clear-last-session', (event) => {
+    try {
+      uiStateSnapshotStore.clearLastSession();
+      return { success: true };
+    } catch (error) {
+      console.error('Error clearing last session:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('renderer:restore-session', async (event) => {
+    try {
+      const session = uiStateSnapshotStore.getLastSession();
+      if (!session) {
+        return { success: true, session: null };
+      }
+
+      if (session.collections && session.collections.length > 0 && watcher && mainWindow) {
+        const collectionPaths = session.collections.map((c) => c.pathname);
+        await openCollectionsByPathname(mainWindow, watcher, collectionPaths);
+      }
+
+      return { success: true, session };
+    } catch (error) {
+      console.error('Error restoring session:', error);
+      return { success: false, error: error.message, session: null };
+    }
+  });
+
   // The app listen for this event and allows the user to save unsaved requests before closing the app
   ipcMain.on('main:start-quit-flow', () => {
     mainWindow.webContents.send('main:start-quit-flow');

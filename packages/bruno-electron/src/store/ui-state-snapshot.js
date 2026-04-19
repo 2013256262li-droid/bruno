@@ -55,6 +55,30 @@ class UiStateSnapshotStore {
         break;
     }
   }
+
+  getAppState() {
+    return this.store.get('appState') || null;
+  }
+
+  saveAppState(state) {
+    this.store.set('appState', state);
+  }
+
+  clearAppState() {
+    this.store.delete('appState');
+  }
+
+  getLastSession() {
+    return this.store.get('lastSession') || null;
+  }
+
+  saveLastSession(session) {
+    this.store.set('lastSession', session);
+  }
+
+  clearLastSession() {
+    this.store.delete('lastSession');
+  }
 }
 
 module.exports = UiStateSnapshotStore;
