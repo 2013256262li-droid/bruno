@@ -87,23 +87,62 @@ const useIpcEvents = () => {
     const state = sessionStateRef.current;
 
     const unopenedPaths = [];
+    const unopenedCollectionUids = new Set();
 
     for (const collection of state.pendingCollections) {
       if (!state.openedCollectionUids.has(collection.uid)) {
         unopenedPaths.push(collection.pathname);
+        unopenedCollectionUids.add(collection.uid);
       }
     }
 
-    if (unopenedPaths.length > 0) {
-      console.warn('Cleaning up unopened collections:', unopenedPaths);
-      try {
-        await dispatch(cleanupFailedCollections(unopenedPaths));
-      } catch (error) {
-        console.error('Failed to cleanup unopened collections:', error);
-      }
+    if (unopenedPaths.length === 0) {
+      return { unopenedPaths: [], cleaned: false, updated: false };
     }
 
-    return unopenedPaths;
+    console.warn('Cleaning up unopened collections:', unopenedPaths);
+
+    let cleanupResult = { cleaned: [], cleanedCollectionUids: [], updated: false };
+    try {
+      cleanupResult = await dispatch(cleanupFailedCollections(unopenedPaths));
+    } catch (error) {
+      console.error('Failed to cleanup unopened collections:', error);
+    }
+
+    if (state.pendingSession) {
+      const openedUids = state.openedCollectionUids;
+
+      const updatedCollections = state.pendingSession.collections?.filter((c) => 
+        openedUids.has(c.uid)
+      ) || [];
+
+      const updatedTabs = state.pendingSession.tabs?.filter((t) => 
+        openedUids.has(t.collectionUid)
+      ) || [];
+
+      let updatedActiveTabUid = state.pendingSession.activeTabUid;
+      if (state.pendingSession.activeTabUid) {
+        const activeTabIsInCleanedTabs = updatedTabs.find((t) => t.uid === state.pendingSession.activeTabUid);
+        if (!activeTabIsInCleanedTabs) {
+          updatedActiveTabUid = updatedTabs.length > 0 ? updatedTabs[0].uid : null;
+        }
+      }
+
+      state.pendingSession = {
+        ...state.pendingSession,
+        collections: updatedCollections,
+        tabs: updatedTabs,
+        activeTabUid: updatedActiveTabUid
+      };
+    }
+
+    return { 
+      unopenedPaths, 
+      unopenedCollectionUids: Array.from(unopenedCollectionUids),
+      cleaned: cleanupResult.cleaned || [],
+      cleanedCollectionUids: cleanupResult.cleanedCollectionUids || [],
+      updated: cleanupResult.updated || (unopenedPaths.length > 0)
+    };
   };
 
   const restoreSessionTabsAndEnvironment = (session, openedCollectionUids) => {
@@ -137,6 +176,8 @@ const useIpcEvents = () => {
       }
     }
 
+    let restoredTabUids = new Set();
+
     if (session.tabs && session.tabs.length > 0) {
       const latestState = store.getState();
       const tabsToRestore = [];
@@ -156,6 +197,7 @@ const useIpcEvents = () => {
 
         if (['workspaceOverview', 'workspaceEnvironments'].includes(tab.type)) {
           tabsToRestore.push(tab);
+          restoredTabUids.add(tab.uid);
           continue;
         }
 
@@ -163,6 +205,7 @@ const useIpcEvents = () => {
           const item = findItemInCollection(collection, tab.uid);
           if (item) {
             tabsToRestore.push(tab);
+            restoredTabUids.add(tab.uid);
           }
           continue;
         }
@@ -178,6 +221,7 @@ const useIpcEvents = () => {
         ];
         if (nonReplaceableTabTypes.includes(tab.type)) {
           tabsToRestore.push(tab);
+          restoredTabUids.add(tab.uid);
         }
       }
 
@@ -185,8 +229,13 @@ const useIpcEvents = () => {
         dispatch(addTab(tab));
       }
 
-      if (session.activeTabUid && openedUids.has(session.activeTabUid)) {
-        dispatch(focusTab({ uid: session.activeTabUid }));
+      if (session.activeTabUid) {
+        if (restoredTabUids.has(session.activeTabUid)) {
+          dispatch(focusTab({ uid: session.activeTabUid }));
+        } else if (tabsToRestore.length > 0) {
+          const firstRestorableTab = tabsToRestore[0];
+          dispatch(focusTab({ uid: firstRestorableTab.uid }));
+        }
       }
     }
 
@@ -354,11 +403,29 @@ const useIpcEvents = () => {
             console.warn('Session restore timeout - some collections may not have loaded');
 
             if (!state.hasRestored) {
-              await cleanupUnopenedCollections();
+              const cleanupResult = await cleanupUnopenedCollections();
 
               if (state.pendingSession && state.openedCollectionUids.size > 0) {
-                restoreSessionTabsAndEnvironment(state.pendingSession, state.openedCollectionUids);
+                const sessionHasRestorableContent = 
+                  state.pendingSession.collections && state.pendingSession.collections.length > 0 ||
+                  state.pendingSession.tabs && state.pendingSession.tabs.length > 0;
+
+                if (sessionHasRestorableContent) {
+                  restoreSessionTabsAndEnvironment(state.pendingSession, state.openedCollectionUids);
+                } else {
+                  try {
+                    await dispatch(clearLastSessionState());
+                  } catch (clearError) {
+                    console.error('Failed to clear empty session:', clearError);
+                  }
+                  clearSessionRestoreState();
+                }
               } else {
+                try {
+                  await dispatch(clearLastSessionState());
+                } catch (clearError) {
+                  console.error('Failed to clear session with no opened collections:', clearError);
+                }
                 clearSessionRestoreState();
               }
             }
